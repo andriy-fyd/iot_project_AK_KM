@@ -34,10 +34,14 @@
 #include "app_log.h"
 #include "temperature.h"
 #include "gatt_db.h" // Pour l'ID de la caractéristique GATT à renvoyer
+#include "sl_sleeptimer.h"
 
 
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
+static sl_sleeptimer_timer_handle_t temperature_timer;
+static uint32_t timer_counter = 0;
+void temperature_timer_callback(sl_sleeptimer_timer_handle_t *handle, void *data);
 
 /**************************************************************************//**
  * Application Init.
@@ -74,6 +78,15 @@ SL_WEAK void app_process_action(void)
  *
  * @param[in] evt Event coming from the Bluetooth stack.
  *****************************************************************************/
+
+void temperature_timer_callback(sl_sleeptimer_timer_handle_t *handle, void *data)
+{
+  (void)handle;
+  (void)data;
+  timer_counter++;
+  app_log_info("Timer step %lu\n", timer_counter);
+}
+
 void sl_bt_on_event(sl_bt_msg_t *evt)
 {
   sl_status_t sc;
@@ -139,6 +152,8 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       uint8_t att_id = evt->data.evt_gatt_server_user_read_request.characteristic;
       uint8_t conn = evt->data.evt_gatt_server_user_read_request.connection;
 
+      app_log_info("Read request on attribute ID: %d\n", att_id);
+
       // Si on lit la caractéristique température
       if (att_id == gattdb_temperature) {
         int16_t temp_ble = get_ble_temperature();
@@ -149,7 +164,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         sl_bt_gatt_server_send_user_read_response(
           conn,
           att_id,
-          SL_STATUS_OK,
+          0,
           sizeof(temp_buffer),
           temp_buffer,
           NULL
@@ -167,6 +182,36 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       }
 
       break;
+
+    case sl_bt_evt_gatt_server_characteristic_status_id: {
+      uint8_t att_id = evt->data.evt_gatt_server_characteristic_status.characteristic;
+      uint8_t status_flags = evt->data.evt_gatt_server_characteristic_status.status_flags;
+      uint16_t client_config = evt->data.evt_gatt_server_characteristic_status.client_config_flags;
+
+      app_log_info("Characteristic status: ID=%d, flags=0x%02X, config=0x%04X\n", att_id, status_flags, client_config);
+
+      if (att_id == gattdb_temperature && status_flags == sl_bt_gatt_server_client_config) {
+        if (client_config == 0x0001) {
+          // Notify activé
+          sl_status_t sc = sl_sleeptimer_start_periodic_timer_ms(
+            &temperature_timer,
+            1000,
+            temperature_timer_callback,
+            NULL,
+            0,
+            0
+          );
+          app_assert_status(sc);
+          app_log_info("Notify enabled -> Timer started\n");
+        } else if (client_config == 0x0000) {
+          // Notify désactivé
+          sl_status_t sc = sl_sleeptimer_stop_timer(&temperature_timer);
+          app_assert_status(sc);
+          app_log_info("Notify disabled -> Timer stopped\n");
+        }
+      }
+      break;
+    }
 
 
     // -------------------------------
